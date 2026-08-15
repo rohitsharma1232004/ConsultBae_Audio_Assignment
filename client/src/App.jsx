@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "https://consultbae-audio-assignment-3.onrender.com";
 
 function formatDuration(seconds) {
   if (seconds == null) return "—";
