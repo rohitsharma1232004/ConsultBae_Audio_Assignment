@@ -1,7 +1,7 @@
 {
-  "name": "fieldvoice-client",
+  "name": "voiceops-ai-client",
   "version": "2.0.0",
-  "description": "Operations dashboard for collecting and reviewing quality-scored voice responses.",
+  "description": "AI voice-intelligence dashboard for transcription, structured insight extraction and human review.",
   "author": "Rohit Sharma",
   "private": true,
   "type": "module",

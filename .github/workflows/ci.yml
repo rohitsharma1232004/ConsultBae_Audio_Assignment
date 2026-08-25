@@ -36,6 +36,6 @@ jobs:
         working-directory: server
         run: npm ci
 
-      - name: Test API quality rules
+      - name: Test API automation rules
         working-directory: server
         run: npm test

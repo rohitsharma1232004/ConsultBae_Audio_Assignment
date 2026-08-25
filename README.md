@@ -1,80 +1,69 @@
-# FieldVoice
+# VoiceOps AI
 
-[![CI](https://github.com/rohitsharma1232004/fieldvoice-audio-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/rohitsharma1232004/fieldvoice-audio-ops/actions/workflows/ci.yml)
+[![CI](https://github.com/rohitsharma1232004/voiceops-ai-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/rohitsharma1232004/voiceops-ai-automation/actions/workflows/ci.yml)
 
-**Voice-response collection and audio quality operations for distributed teams.**
+**AI-powered voice intelligence and human-in-the-loop operations automation.**
 
-FieldVoice gives research, customer-experience and field-operations teams one place to capture structured voice responses, automatically inspect recording quality, and move each response through a lightweight review workflow.
+VoiceOps AI turns field interviews, customer feedback and inspection recordings into quality-checked transcripts and structured operational insights. It combines deterministic audio QA with AI-assisted transcription and triage, then keeps approval and follow-up decisions with a human reviewer.
 
-It is designed for real-world collection programmes where inconsistent devices, noisy environments and manual file handling make voice data difficult to trust at scale.
+This is a portfolio-grade AI automation project built around a realistic workflow: unstructured voice enters the system, automation enriches it, and an operations team receives traceable outputs it can act on.
 
-## Product capabilities
+## What it automates
 
-- Record from the browser or upload an existing audio file
-- Attach contributor, project, response type and field context
-- Extract duration, sample rate, bitrate and integrated loudness on the server
-- Score each recording against an explainable four-part quality gate
-- Monitor collection volume, contributors, pending reviews and readiness rate
-- Search and filter the response library by person, project, review state or quality
-- Play recordings in place and mark them approved or needing follow-up
-- Preserve people and submission records in a relational SQLite schema
-- Upgrade an existing database automatically with non-destructive schema migrations
-- Validate file type, size, required data and phone format at the API boundary
+- Records audio in the browser or accepts existing audio uploads
+- Links every response to a contributor, project, response type and field context
+- Extracts duration, sample rate, bitrate and integrated loudness with FFmpeg
+- Applies a transparent four-signal audio quality gate
+- Transcribes speech through Groq's Whisper API
+- Converts transcripts into a summary, sentiment, priority, category, topics and suggested next action
+- Tracks queued, processing, completed and failed AI jobs with automatic UI polling
+- Supports manual AI runs and safe retries after a failed request
+- Exposes searchable response, quality and AI-processing views in one dashboard
+- Keeps approve and follow-up actions under explicit human control
+- Runs without an AI key, so the local quality and review workflow remains usable
 
-## Why this project exists
+## Automation workflow
 
-Voice data is often collected through messaging apps, shared drives and spreadsheets. That creates three operational problems:
+```mermaid
+flowchart TD
+    A[Voice capture or upload] --> B[Validation and storage]
+    B --> C[FFmpeg audio QA]
+    C --> D{Groq configured?}
+    D -- Yes --> E[Whisper transcription]
+    E --> F[Structured LLM insights]
+    D -- No --> G[Local review queue]
+    F --> H[Human review]
+    G --> H
+    H --> I[Approve or request follow-up]
+```
 
-1. responses lose their project and contributor context;
-2. unusable audio is discovered late; and
-3. reviewers have no shared queue or approval state.
+## AI output contract
 
-FieldVoice moves capture, audio QA and review into one workflow. Its quality score is intentionally rules-based and transparent, so an operations team can understand exactly why a recording passed or needs attention.
+The analysis layer requests JSON and normalizes every response before persistence.
+
+| Field | Allowed or expected value |
+| --- | --- |
+| `summary` | Grounded summary of the transcript |
+| `sentiment` | `positive`, `neutral`, `negative`, `mixed` |
+| `priority` | `low`, `medium`, `high`, `urgent` |
+| `category` | Short operational category |
+| `key_topics` | Up to six concise topics |
+| `recommended_action` | Suggested next step for a reviewer |
+
+The model is explicitly instructed not to approve or reject a response. AI output is assistive and should be verified by a human before action.
 
 ## System design
 
-```mermaid
-flowchart LR
-    A[Browser capture] --> B[Express API]
-    B --> C[FFprobe metadata]
-    B --> D[FFmpeg loudness]
-    C --> E[Quality rules]
-    D --> E
-    E --> F[(SQLite)]
-    B --> G[Audio storage]
-    F --> H[Operations dashboard]
-    G --> H
-```
-
-## Technology
-
 | Layer | Technology | Responsibility |
 | --- | --- | --- |
-| Frontend | React 19, Vite, Lucide | Capture, dashboards, filtering and review UX |
-| API | Node.js, Express 5 | Validation, uploads, queries and review workflow |
-| Audio processing | FFprobe, FFmpeg `loudnorm` | Technical metadata and integrated loudness |
-| Persistence | SQLite, better-sqlite3 | People, submissions and review state |
-| Uploads | Multer | MIME and size validation, local file storage |
-| Tests | Node test runner | Deterministic audio-quality rule tests |
+| Frontend | React 19, Vite, Lucide | Capture, live AI state, insights, filters and review UX |
+| API | Node.js, Express 5 | Validation, orchestration, uploads and workflow endpoints |
+| Audio processing | FFprobe, FFmpeg `loudnorm` | Metadata extraction and integrated loudness |
+| AI automation | Groq API, Whisper, Llama | Transcription and structured operational analysis |
+| Persistence | SQLite, better-sqlite3 | Contributors, submissions, AI results and review state |
+| Tests | Node test runner | Quality rules and AI-output normalization |
 
-The project uses `ffmpeg-static` and `ffprobe-static`, so a global FFmpeg installation is not required.
-
-## Quality gate
-
-Each recording receives 25 points for every passing check:
-
-| Signal | Ready threshold |
-| --- | --- |
-| Duration | At least 2 seconds |
-| Sample rate | At least 16 kHz |
-| Bitrate | At least 32 kbps |
-| Integrated loudness | Between -35 dB and -8 dB |
-
-- **75–100:** ready
-- **50:** manual review
-- **0–25:** re-record recommended
-
-The thresholds are isolated in `server/src/quality.js` so they can be adjusted for a programme's capture standards.
+`ffmpeg-static` and `ffprobe-static` are included, so a global FFmpeg installation is not required.
 
 ## Local setup
 
@@ -102,50 +91,65 @@ Open `http://localhost:5173`. The API runs on `http://localhost:5000` by default
 
 On Windows PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
 
+## Enable AI automation
+
+Add a Groq API key to `server/.env`:
+
+```env
+GROQ_API_KEY=your_key_here
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+GROQ_ANALYSIS_MODEL=llama-3.1-8b-instant
+AI_AUTO_PROCESS=true
+```
+
+Never commit `.env` or an API key. When the key is absent, VoiceOps AI clearly switches to local mode: capture, quality scoring, storage and human review continue to work, while AI actions stay disabled.
+
 ## API surface
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | Service health |
-| `POST` | `/api/submissions` | Upload and analyse a voice response |
-| `GET` | `/api/submissions` | List and optionally filter responses |
-| `GET` | `/api/overview` | Aggregate dashboard metrics |
-| `PATCH` | `/api/submissions/:id/review` | Change review state |
+| `GET` | `/api/ai/status` | Safe provider/model configuration status |
+| `POST` | `/api/submissions` | Upload, inspect and optionally queue a voice response |
+| `GET` | `/api/submissions` | List and filter responses with AI results |
+| `GET` | `/api/overview` | Aggregate collection, review and AI metrics |
+| `POST` | `/api/submissions/:id/analyze` | Run or retry transcription and insight extraction |
+| `PATCH` | `/api/submissions/:id/review` | Record a human review decision |
 | `GET` | `/uploads/:filename` | Stream stored audio |
 
-The submission endpoint accepts multipart fields: `name`, `phone`, `projectName`, `responseType`, `notes` and `audio`.
+The upload endpoint accepts multipart fields: `name`, `phone`, `projectName`, `responseType`, `notes` and `audio`.
 
-## Data model
+## Quality gate
 
-`people` stores a contributor once per phone number. `audio_submissions` stores project context, file information, technical metadata and the review lifecycle. Local data is created under:
+Each recording receives 25 points for every passing check:
 
-```text
-server/data/app.db
-server/uploads/
-```
+| Signal | Ready threshold |
+| --- | --- |
+| Duration | At least 2 seconds |
+| Sample rate | At least 16 kHz |
+| Bitrate | At least 32 kbps |
+| Integrated loudness | Between -35 dB and -8 dB |
 
-Both paths are excluded from Git.
+- **75–100:** ready
+- **50:** manual review
+- **0–25:** re-record recommended
+
+The thresholds are isolated in `server/src/quality.js`, while AI response normalization lives in `server/src/ai.js`.
 
 ## Validation
-
-Run the backend quality-rule tests:
 
 ```bash
 cd server
 npm test
-```
 
-Create a production frontend bundle:
-
-```bash
-cd client
+cd ../client
 npm run build
 ```
 
 ## Production roadmap
 
-The current storage adapter is intentionally simple for local and single-instance deployments. A production rollout would replace local audio files with S3 or Azure Blob Storage, run FFmpeg analysis through a job queue, use PostgreSQL for shared persistence, add authenticated workspaces and keep an audit log for review changes.
+For a multi-tenant production deployment, move audio to object storage, place AI work on a durable queue, use PostgreSQL, add authenticated workspaces, encrypt sensitive contributor data and retain an audit log of model outputs and reviewer decisions.
 
 ## Portfolio summary
 
-Built a full-stack voice operations platform using React, Express, SQLite and FFmpeg. Implemented browser recording, multipart uploads, server-side audio analysis, an explainable quality-scoring engine, operational dashboards, searchable review queues, schema migration and automated tests.
+Built an AI voice-operations automation platform using React, Express, SQLite, FFmpeg and Groq. Designed an end-to-end pipeline for browser audio capture, deterministic quality scoring, Whisper transcription, schema-constrained LLM insight extraction, asynchronous processing, failure recovery and human-in-the-loop review.

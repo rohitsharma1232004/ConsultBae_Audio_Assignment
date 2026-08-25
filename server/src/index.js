@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import db from "./db.js";
 import { extractAudioMetadata } from "./audio.js";
 import { assessAudioQuality } from "./quality.js";
+import { getAIConfigStatus, runVoiceAI } from "./ai.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(currentFile);
@@ -15,6 +16,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const uploadDir = path.resolve(__dirname, "..", "uploads");
 const allowedReviewStatuses = new Set(["pending", "approved", "needs_follow_up"]);
+const aiProcessing = new Set();
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "")
   .split(",")
   .map(origin => origin.trim())
@@ -76,9 +78,18 @@ function serializeSubmission(row, req) {
     ? row.audio_path
     : `${req.protocol}://${req.get("host")}${audioPath}`;
 
+  let aiTopics = [];
+  try {
+    aiTopics = JSON.parse(row.ai_topics_json || "[]");
+  } catch {
+    aiTopics = [];
+  }
+
+  const { ai_topics_json: _internalTopics, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     audio_url: audioUrl,
+    ai_topics: aiTopics,
     quality: assessAudioQuality(metadataFromRow(row))
   };
 }
@@ -94,6 +105,16 @@ const submissionSelect = `
     s.review_status,
     s.review_notes,
     s.reviewed_at,
+    s.transcript,
+    s.ai_summary,
+    s.ai_sentiment,
+    s.ai_priority,
+    s.ai_category,
+    s.ai_topics_json,
+    s.ai_recommended_action,
+    s.ai_status,
+    s.ai_error,
+    s.ai_processed_at,
     s.original_filename,
     s.audio_path,
     s.mime_type,
@@ -109,8 +130,85 @@ const submissionSelect = `
   JOIN people p ON p.id = s.person_id
 `;
 
+async function processSubmissionAI(id) {
+  if (aiProcessing.has(id)) return false;
+
+  const config = getAIConfigStatus();
+  if (!config.configured) {
+    db.prepare("UPDATE audio_submissions SET ai_status = 'not_configured' WHERE id = ?").run(id);
+    throw new Error("Groq AI is not configured on this server.");
+  }
+
+  const task = db.prepare(`
+    SELECT stored_filename, original_filename, mime_type, project_name, response_type, notes
+    FROM audio_submissions
+    WHERE id = ?
+  `).get(id);
+  if (!task) return null;
+
+  aiProcessing.add(id);
+  db.prepare(`
+    UPDATE audio_submissions
+    SET ai_status = 'processing', ai_error = NULL
+    WHERE id = ?
+  `).run(id);
+
+  try {
+    const result = await runVoiceAI({
+      filePath: path.join(uploadDir, task.stored_filename),
+      mimeType: task.mime_type,
+      originalFilename: task.original_filename,
+      context: {
+        projectName: task.project_name,
+        responseType: task.response_type,
+        notes: task.notes
+      }
+    });
+
+    db.prepare(`
+      UPDATE audio_submissions
+      SET
+        transcript = ?,
+        ai_summary = ?,
+        ai_sentiment = ?,
+        ai_priority = ?,
+        ai_category = ?,
+        ai_topics_json = ?,
+        ai_recommended_action = ?,
+        ai_status = 'completed',
+        ai_error = NULL,
+        ai_processed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      result.transcript,
+      result.summary,
+      result.sentiment,
+      result.priority,
+      result.category,
+      JSON.stringify(result.keyTopics),
+      result.recommendedAction,
+      id
+    );
+
+    return true;
+  } catch (error) {
+    db.prepare(`
+      UPDATE audio_submissions
+      SET ai_status = 'failed', ai_error = ?
+      WHERE id = ?
+    `).run(cleanText(error.message || "AI processing failed.", 400), id);
+    throw error;
+  } finally {
+    aiProcessing.delete(id);
+  }
+}
+
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "fieldvoice-api", timestamp: new Date().toISOString() });
+  res.json({ ok: true, service: "voiceops-ai-api", timestamp: new Date().toISOString() });
+});
+
+app.get("/api/ai/status", (_req, res) => {
+  res.json(getAIConfigStatus());
 });
 
 app.post("/api/submissions", upload.single("audio"), async (req, res) => {
@@ -137,6 +235,10 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
   try {
     const metadata = await extractAudioMetadata(req.file.path);
     const quality = assessAudioQuality(metadata);
+    const aiConfig = getAIConfigStatus();
+    const aiStatus = aiConfig.configured
+      ? (aiConfig.autoProcess ? "queued" : "pending")
+      : "not_configured";
 
     const insertSubmission = db.transaction(() => {
       let person = db.prepare("SELECT id FROM people WHERE phone = ?").get(phone);
@@ -166,8 +268,9 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
           loudness_db,
           project_name,
           response_type,
-          notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          notes,
+          ai_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         person.id,
         req.file.originalname,
@@ -183,15 +286,26 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
         metadata.loudnessDb,
         projectName,
         responseType,
-        notes || null
+        notes || null,
+        aiStatus
       ).lastInsertRowid;
     });
 
     const insertedId = insertSubmission();
     const row = db.prepare(`${submissionSelect} WHERE s.id = ?`).get(insertedId);
 
+    if (aiStatus === "queued") {
+      setImmediate(() => {
+        processSubmissionAI(insertedId).catch(error => {
+          console.error(`AI processing failed for submission ${insertedId}:`, error.message);
+        });
+      });
+    }
+
     res.status(201).json({
-      message: "Voice response captured successfully.",
+      message: aiStatus === "queued"
+        ? "Voice response captured. AI processing has started."
+        : "Voice response captured successfully.",
       submission: serializeSubmission(row, req),
       metadata,
       quality
@@ -241,7 +355,9 @@ app.get("/api/overview", (_req, res) => {
       COUNT(DISTINCT person_id) AS unique_people,
       ROUND(AVG(duration_seconds), 1) AS average_duration_seconds,
       SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END) AS pending_reviews,
-      SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS approved_reviews
+      SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS approved_reviews,
+      SUM(CASE WHEN ai_status = 'completed' THEN 1 ELSE 0 END) AS ai_completed,
+      SUM(CASE WHEN ai_status IN ('queued', 'processing') THEN 1 ELSE 0 END) AS ai_processing
     FROM audio_submissions
   `).get();
 
@@ -254,6 +370,31 @@ app.get("/api/overview", (_req, res) => {
   `).all();
 
   res.json({ ...totals, projects });
+});
+
+app.post("/api/submissions/:id/analyze", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid submission id." });
+  }
+
+  if (!getAIConfigStatus().configured) {
+    return res.status(503).json({ error: "Groq AI is not configured on this server." });
+  }
+
+  try {
+    const result = await processSubmissionAI(id);
+    if (result === null) return res.status(404).json({ error: "Submission not found." });
+    if (result === false) return res.status(409).json({ error: "AI processing is already running." });
+    const row = db.prepare(`${submissionSelect} WHERE s.id = ?`).get(id);
+    res.json(serializeSubmission(row, req));
+  } catch (error) {
+    res.status(error.status === 429 ? 429 : 502).json({
+      error: error.status === 429
+        ? "Groq rate limit reached. Retry shortly."
+        : "AI processing failed. Check the server configuration and retry."
+    });
+  }
 });
 
 app.patch("/api/submissions/:id/review", (req, res) => {
@@ -293,7 +434,7 @@ app.use((error, _req, res, _next) => {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
   app.listen(PORT, () => {
-    console.log(`FieldVoice API running on http://localhost:${PORT}`);
+    console.log(`VoiceOps AI API running on http://localhost:${PORT}`);
   });
 }
 

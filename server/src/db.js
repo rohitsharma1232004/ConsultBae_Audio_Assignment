@@ -38,10 +38,26 @@ db.exec(`
     review_status TEXT NOT NULL DEFAULT 'pending',
     review_notes TEXT,
     reviewed_at TEXT,
+    transcript TEXT,
+    ai_summary TEXT,
+    ai_sentiment TEXT,
+    ai_priority TEXT,
+    ai_category TEXT,
+    ai_topics_json TEXT,
+    ai_recommended_action TEXT,
+    ai_status TEXT NOT NULL DEFAULT 'not_configured',
+    ai_error TEXT,
+    ai_processed_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (person_id) REFERENCES people(id)
   );
 `);
+
+db.prepare(`
+  UPDATE audio_submissions
+  SET ai_status = 'failed', ai_error = 'Processing was interrupted. Retry the AI analysis.'
+  WHERE ai_status IN ('queued', 'processing')
+`).run();
 
 const submissionColumns = new Set(
   db.prepare("PRAGMA table_info(audio_submissions)").all().map(column => column.name)
@@ -59,12 +75,24 @@ ensureColumn("notes", "TEXT");
 ensureColumn("review_status", "TEXT NOT NULL DEFAULT 'pending'");
 ensureColumn("review_notes", "TEXT");
 ensureColumn("reviewed_at", "TEXT");
+ensureColumn("transcript", "TEXT");
+ensureColumn("ai_summary", "TEXT");
+ensureColumn("ai_sentiment", "TEXT");
+ensureColumn("ai_priority", "TEXT");
+ensureColumn("ai_category", "TEXT");
+ensureColumn("ai_topics_json", "TEXT");
+ensureColumn("ai_recommended_action", "TEXT");
+ensureColumn("ai_status", "TEXT NOT NULL DEFAULT 'not_configured'");
+ensureColumn("ai_error", "TEXT");
+ensureColumn("ai_processed_at", "TEXT");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audio_submissions_created_at
     ON audio_submissions(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_audio_submissions_review_status
     ON audio_submissions(review_status);
+  CREATE INDEX IF NOT EXISTS idx_audio_submissions_ai_status
+    ON audio_submissions(ai_status);
 `);
 
 export default db;

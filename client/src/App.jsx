@@ -4,6 +4,7 @@ import {
   AlertCircle,
   AudioLines,
   BarChart3,
+  BrainCircuit,
   CheckCircle2,
   Clock3,
   FileAudio,
@@ -16,6 +17,7 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Sparkles,
   Upload,
   Users,
   X
@@ -100,9 +102,12 @@ export default function App() {
   const [notice, setNotice] = useState(null);
   const [submissions, setSubmissions] = useState([]);
   const [overview, setOverview] = useState(null);
+  const [aiConfig, setAiConfig] = useState(null);
+  const [analyzingIds, setAnalyzingIds] = useState([]);
   const [search, setSearch] = useState("");
   const [reviewFilter, setReviewFilter] = useState("all");
   const [qualityFilter, setQualityFilter] = useState("all");
+  const [aiFilter, setAiFilter] = useState("all");
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const chunksRef = useRef([]);
@@ -111,21 +116,24 @@ export default function App() {
   const loadData = useCallback(async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true);
     try {
-      const [submissionsResponse, overviewResponse] = await Promise.all([
+      const [submissionsResponse, overviewResponse, aiResponse] = await Promise.all([
         fetch(`${API}/api/submissions`),
-        fetch(`${API}/api/overview`)
+        fetch(`${API}/api/overview`),
+        fetch(`${API}/api/ai/status`)
       ]);
 
-      if (!submissionsResponse.ok || !overviewResponse.ok) {
+      if (!submissionsResponse.ok || !overviewResponse.ok || !aiResponse.ok) {
         throw new Error("The workspace could not be loaded.");
       }
 
-      const [submissionsData, overviewData] = await Promise.all([
+      const [submissionsData, overviewData, aiData] = await Promise.all([
         submissionsResponse.json(),
-        overviewResponse.json()
+        overviewResponse.json(),
+        aiResponse.json()
       ]);
       setSubmissions(submissionsData);
       setOverview(overviewData);
+      setAiConfig(aiData);
     } catch (error) {
       setNotice({ type: "error", text: error.message || "Could not connect to the API." });
     } finally {
@@ -141,16 +149,26 @@ export default function App() {
     };
   }, [loadData]);
 
+  useEffect(() => {
+    const hasActiveAIJob = submissions.some(item => ["queued", "processing"].includes(item.ai_status));
+    if (!hasActiveAIJob) return undefined;
+    const pollingTimer = setInterval(() => loadData({ quiet: true }), 4000);
+    return () => clearInterval(pollingTimer);
+  }, [submissions, loadData]);
+
   const filteredSubmissions = useMemo(() => {
     const query = search.trim().toLowerCase();
     return submissions.filter(item => {
-      const matchesSearch = !query || [item.name, item.phone, item.project_name, item.response_type]
+      const matchesSearch = !query || [item.name, item.phone, item.project_name, item.response_type, item.transcript, item.ai_summary, item.ai_category]
         .some(value => String(value || "").toLowerCase().includes(query));
       const matchesReview = reviewFilter === "all" || item.review_status === reviewFilter;
       const matchesQuality = qualityFilter === "all" || fallbackQuality(item).status === qualityFilter;
-      return matchesSearch && matchesReview && matchesQuality;
+      const matchesAI = aiFilter === "all"
+        || (aiFilter === "active" && ["queued", "processing"].includes(item.ai_status))
+        || item.ai_status === aiFilter;
+      return matchesSearch && matchesReview && matchesQuality && matchesAI;
     });
-  }, [submissions, search, reviewFilter, qualityFilter]);
+  }, [submissions, search, reviewFilter, qualityFilter, aiFilter]);
 
   const calculatedStats = useMemo(() => {
     const durations = submissions
@@ -160,6 +178,7 @@ export default function App() {
       total: Number(overview?.total_submissions ?? submissions.length),
       people: Number(overview?.unique_people ?? new Set(submissions.map(item => item.phone)).size),
       pending: Number(overview?.pending_reviews ?? submissions.filter(item => item.review_status === "pending").length),
+      aiCompleted: Number(overview?.ai_completed ?? submissions.filter(item => item.ai_status === "completed").length),
       averageDuration: Number(overview?.average_duration_seconds ?? (
         durations.length ? durations.reduce((sum, duration) => sum + duration, 0) / durations.length : 0
       )),
@@ -197,7 +216,7 @@ export default function App() {
       };
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        setFile(new File([blob], `field-response-${Date.now()}.webm`, { type: blob.type }));
+        setFile(new File([blob], `voiceops-response-${Date.now()}.webm`, { type: blob.type }));
         stream.getTracks().forEach(track => track.stop());
         mediaStreamRef.current = null;
       };
@@ -256,7 +275,9 @@ export default function App() {
 
       setNotice({
         type: data.quality.status === "ready" ? "success" : "warning",
-        text: `Response saved with an audio quality score of ${data.quality.score}/100.`
+        text: aiConfig?.configured
+          ? `Response saved with quality ${data.quality.score}/100. AI analysis has started.`
+          : `Response saved with an audio quality score of ${data.quality.score}/100.`
       });
       setForm({ name: "", phone: "", projectName: "", responseType: RESPONSE_TYPES[0], notes: "" });
       setFile(null);
@@ -287,10 +308,29 @@ export default function App() {
     }
   }
 
+  async function analyzeSubmission(id) {
+    setAnalyzingIds(current => [...current, id]);
+    setSubmissions(current => current.map(item => item.id === id ? { ...item, ai_status: "processing", ai_error: null } : item));
+    try {
+      const response = await fetch(`${API}/api/submissions/${id}/analyze`, { method: "POST" });
+      const updated = await response.json();
+      if (!response.ok) throw new Error(updated.error || "AI analysis could not be completed.");
+      setSubmissions(current => current.map(item => item.id === id ? updated : item));
+      setNotice({ type: "success", text: "Transcript and structured AI insights are ready for human review." });
+      const overviewResponse = await fetch(`${API}/api/overview`);
+      if (overviewResponse.ok) setOverview(await overviewResponse.json());
+    } catch (error) {
+      setNotice({ type: "error", text: error.message || "AI analysis failed." });
+      await loadData({ quiet: true });
+    } finally {
+      setAnalyzingIds(current => current.filter(itemId => itemId !== id));
+    }
+  }
+
   const pageTitle = {
-    overview: ["Operations overview", "Monitor collection progress and audio readiness."],
-    capture: ["Capture a response", "Record or upload structured voice data from the field."],
-    library: ["Response library", "Review, filter and approve every captured response."]
+    overview: ["AI operations overview", "Monitor voice intake, AI processing and human review."],
+    capture: ["Capture a response", "Turn raw voice data into structured operational insight."],
+    library: ["Voice intelligence library", "Review transcripts, AI insights and every human decision."]
   }[view];
 
   return (
@@ -298,7 +338,7 @@ export default function App() {
       <aside className="sidebar">
         <button className="brand" onClick={() => setView("overview")} aria-label="Go to overview">
           <span className="brand-mark"><AudioLines size={22} strokeWidth={2.4} /></span>
-          <span><strong>FieldVoice</strong><small>Audio operations</small></span>
+          <span><strong>VoiceOps AI</strong><small>Voice intelligence</small></span>
         </button>
 
         <nav className="nav" aria-label="Primary navigation">
@@ -308,15 +348,18 @@ export default function App() {
         </nav>
 
         <div className="sidebar-status">
-          <span className="status-dot" />
-          <div><strong>Workspace active</strong><small>Audio analysis enabled</small></div>
+          <span className={aiConfig?.configured ? "status-dot" : "status-dot muted"} />
+          <div>
+            <strong>{aiConfig?.configured ? "AI pipeline connected" : "Local mode active"}</strong>
+            <small>{aiConfig?.configured ? "Transcription + insights" : "Add GROQ_API_KEY for AI"}</small>
+          </div>
         </div>
       </aside>
 
       <main className="workspace">
         <header className="workspace-header">
           <div>
-            <p className="eyebrow">Voice data operations</p>
+            <p className="eyebrow">AI automation workspace</p>
             <h1>{pageTitle[0]}</h1>
             <p>{pageTitle[1]}</p>
           </div>
@@ -363,6 +406,7 @@ export default function App() {
             stopRecording={stopRecording}
             chooseFile={chooseFile}
             submit={submit}
+            aiConfig={aiConfig}
           />
         )}
 
@@ -377,7 +421,12 @@ export default function App() {
             setReviewFilter={setReviewFilter}
             qualityFilter={qualityFilter}
             setQualityFilter={setQualityFilter}
+            aiFilter={aiFilter}
+            setAiFilter={setAiFilter}
             updateReview={updateReview}
+            analyzeSubmission={analyzeSubmission}
+            analyzingIds={analyzingIds}
+            aiConfig={aiConfig}
             onCapture={() => setView("capture")}
           />
         )}
@@ -399,6 +448,7 @@ function Overview({ loading, stats, qualityBreakdown, recent, projects, onOpenLi
   const statCards = [
     { label: "Total responses", value: stats.total, icon: FileAudio, tone: "violet" },
     { label: "Unique contributors", value: stats.people, icon: Users, tone: "blue" },
+    { label: "AI processed", value: stats.aiCompleted, icon: BrainCircuit, tone: "purple" },
     { label: "Pending review", value: stats.pending, icon: Clock3, tone: "amber" },
     { label: "Ready for use", value: stats.ready, icon: ShieldCheck, tone: "green" }
   ];
@@ -493,7 +543,7 @@ function RecentRow({ item }) {
   );
 }
 
-function CaptureForm({ form, updateForm, file, setFile, recording, recordSeconds, submitting, startRecording, stopRecording, chooseFile, submit }) {
+function CaptureForm({ form, updateForm, file, setFile, recording, recordSeconds, submitting, startRecording, stopRecording, chooseFile, submit, aiConfig }) {
   return (
     <form className="capture-layout" onSubmit={submit}>
       <section className="panel form-panel">
@@ -550,7 +600,11 @@ function CaptureForm({ form, updateForm, file, setFile, recording, recordSeconds
         </Field>
 
         <button className="submit-button" disabled={recording || submitting}>
-          {submitting ? <><RefreshCw className="spin" size={18} /> Analyzing audio...</> : <><ShieldCheck size={18} /> Save and run quality checks</>}
+          {submitting
+            ? <><RefreshCw className="spin" size={18} /> Processing audio...</>
+            : aiConfig?.configured
+              ? <><Sparkles size={18} /> Save and start AI pipeline</>
+              : <><ShieldCheck size={18} /> Save and run quality checks</>}
         </button>
       </section>
 
@@ -558,13 +612,25 @@ function CaptureForm({ form, updateForm, file, setFile, recording, recordSeconds
         <div className="panel checklist-card">
           <p className="section-kicker">Automatic checks</p>
           <h3>Quality gate</h3>
-          <p>FieldVoice checks every recording before it enters the review queue.</p>
+          <p>VoiceOps AI checks every recording before it enters the review queue.</p>
           <ul>
             <li><Clock3 size={16} /><span><strong>Duration</strong>Minimum 2 seconds</span></li>
             <li><Activity size={16} /><span><strong>Sample rate</strong>16 kHz or higher</span></li>
             <li><AudioLines size={16} /><span><strong>Bitrate</strong>32 kbps or higher</span></li>
             <li><BarChart3 size={16} /><span><strong>Loudness</strong>Between −35 and −8 dB</span></li>
           </ul>
+        </div>
+        <div className="panel ai-pipeline-card">
+          <p className="section-kicker">AI automation</p>
+          <h3><BrainCircuit size={18} /> From audio to action</h3>
+          <div className="pipeline-steps">
+            <span><b>1</b> Speech transcription</span>
+            <span><b>2</b> Structured insight extraction</span>
+            <span><b>3</b> Human review and decision</span>
+          </div>
+          <p className={aiConfig?.configured ? "ai-config ready" : "ai-config"}>
+            {aiConfig?.configured ? `${aiConfig.transcriptionModel} · ${aiConfig.analysisModel}` : "Optional AI is off until GROQ_API_KEY is configured."}
+          </p>
         </div>
         <div className="privacy-card"><ShieldCheck size={21} /><div><strong>Controlled storage</strong><p>Files stay in your configured storage and metadata remains linked to each response.</p></div></div>
       </aside>
@@ -581,11 +647,11 @@ function Field({ label, hint, required, children }) {
   );
 }
 
-function Library({ loading, submissions, total, search, setSearch, reviewFilter, setReviewFilter, qualityFilter, setQualityFilter, updateReview, onCapture }) {
+function Library({ loading, submissions, total, search, setSearch, reviewFilter, setReviewFilter, qualityFilter, setQualityFilter, aiFilter, setAiFilter, updateReview, analyzeSubmission, analyzingIds, aiConfig, onCapture }) {
   return (
     <section className="panel library-panel">
       <div className="library-toolbar">
-        <div className="search-box"><Search size={18} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search person, phone or project..." /></div>
+        <div className="search-box"><Search size={18} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search people, projects or AI insights..." /></div>
         <div className="filters">
           <span><ListFilter size={16} /> Filters</span>
           <select value={reviewFilter} onChange={event => setReviewFilter(event.target.value)} aria-label="Filter by review status">
@@ -598,6 +664,13 @@ function Library({ loading, submissions, total, search, setSearch, reviewFilter,
             <option value="review">Manual review</option>
             <option value="re-record">Re-record</option>
           </select>
+          <select value={aiFilter} onChange={event => setAiFilter(event.target.value)} aria-label="Filter by AI status">
+            <option value="all">All AI states</option>
+            <option value="completed">AI completed</option>
+            <option value="active">AI processing</option>
+            <option value="failed">AI failed</option>
+            <option value="not_configured">AI not configured</option>
+          </select>
         </div>
       </div>
 
@@ -607,7 +680,16 @@ function Library({ loading, submissions, total, search, setSearch, reviewFilter,
         <div className="loading-state"><RefreshCw className="spin" size={22} /> Loading response library...</div>
       ) : submissions.length ? (
         <div className="submission-list">
-          {submissions.map(item => <SubmissionCard item={item} updateReview={updateReview} key={item.id} />)}
+          {submissions.map(item => (
+            <SubmissionCard
+              item={item}
+              updateReview={updateReview}
+              analyzeSubmission={analyzeSubmission}
+              analyzing={analyzingIds.includes(item.id)}
+              aiConfig={aiConfig}
+              key={item.id}
+            />
+          ))}
         </div>
       ) : (
         <div className="empty-state"><span><Headphones size={30} /></span><h3>No responses found</h3><p>Adjust the filters or capture a new voice response.</p><button className="primary-button" onClick={onCapture}><Mic2 size={17} /> Capture audio</button></div>
@@ -616,7 +698,7 @@ function Library({ loading, submissions, total, search, setSearch, reviewFilter,
   );
 }
 
-function SubmissionCard({ item, updateReview }) {
+function SubmissionCard({ item, updateReview, analyzeSubmission, analyzing, aiConfig }) {
   const quality = fallbackQuality(item);
   const reviewLabel = REVIEW_OPTIONS.find(option => option.value === item.review_status)?.label || "Pending review";
   return (
@@ -647,6 +729,8 @@ function SubmissionCard({ item, updateReview }) {
         </div>
       )}
 
+      <AIInsight item={item} analyzing={analyzing} aiConfig={aiConfig} onAnalyze={() => analyzeSubmission(item.id)} />
+
       <div className="review-row">
         <span className={`review-pill ${item.review_status || "pending"}`}>{reviewLabel}</span>
         <div>
@@ -655,6 +739,46 @@ function SubmissionCard({ item, updateReview }) {
         </div>
       </div>
     </article>
+  );
+}
+
+function AIInsight({ item, analyzing, aiConfig, onAnalyze }) {
+  const status = analyzing ? "processing" : (item.ai_status || "not_configured");
+
+  if (status === "completed") {
+    return (
+      <section className="ai-insight">
+        <div className="ai-insight-heading">
+          <div><Sparkles size={16} /><strong>AI-generated insight</strong></div>
+          <span className={`priority-badge ${item.ai_priority || "medium"}`}>{item.ai_priority || "medium"} priority</span>
+        </div>
+        <p className="ai-summary">{item.ai_summary}</p>
+        <div className="ai-facts">
+          <span><small>Sentiment</small><strong>{item.ai_sentiment || "neutral"}</strong></span>
+          <span><small>Category</small><strong>{item.ai_category || "General"}</strong></span>
+          <span><small>Suggested action</small><strong>{item.ai_recommended_action || "Review the response."}</strong></span>
+        </div>
+        {item.ai_topics?.length > 0 && <div className="topic-list">{item.ai_topics.map(topic => <span key={topic}>{topic}</span>)}</div>}
+        {item.transcript && <details className="transcript"><summary>View transcript</summary><p>{item.transcript}</p></details>}
+        <p className="ai-disclaimer"><ShieldCheck size={13} /> AI assists triage; approval remains a human decision.</p>
+      </section>
+    );
+  }
+
+  if (["queued", "processing"].includes(status)) {
+    return <div className="ai-state processing"><RefreshCw className="spin" size={16} /><span><strong>AI pipeline running</strong>Transcribing and extracting structured insights…</span></div>;
+  }
+
+  const canAnalyze = Boolean(aiConfig?.configured);
+  return (
+    <div className={`ai-state ${status === "failed" ? "failed" : "idle"}`}>
+      {status === "failed" ? <AlertCircle size={16} /> : <BrainCircuit size={16} />}
+      <span>
+        <strong>{status === "failed" ? "AI analysis needs a retry" : canAnalyze ? "Ready for AI analysis" : "AI integration is optional"}</strong>
+        {status === "failed" ? (item.ai_error || "The last run did not complete.") : canAnalyze ? "Generate a transcript and structured insight." : "Configure GROQ_API_KEY to enable transcription and insight extraction."}
+      </span>
+      {canAnalyze && <button type="button" className="ai-action" onClick={onAnalyze}>{status === "failed" ? "Retry AI" : "Run AI"}</button>}
+    </div>
   );
 }
 
