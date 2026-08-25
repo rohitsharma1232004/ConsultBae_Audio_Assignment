@@ -204,7 +204,7 @@ async function processSubmissionAI(id) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "voiceops-ai-api", timestamp: new Date().toISOString() });
+  res.json({ ok: true, service: "voice-insight-automation-api", timestamp: new Date().toISOString() });
 });
 
 app.get("/api/ai/status", (_req, res) => {
@@ -434,7 +434,7 @@ app.use((error, _req, res, _next) => {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
   app.listen(PORT, () => {
-    console.log(`VoiceOps AI API running on http://localhost:${PORT}`);
+    console.log(`Voice Insight Automation API running on http://localhost:${PORT}`);
   });
 }
 

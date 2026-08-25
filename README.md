@@ -1,10 +1,10 @@
-# VoiceOps AI
+# Voice Insight Automation
 
-[![CI](https://github.com/rohitsharma1232004/voiceops-ai-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/rohitsharma1232004/voiceops-ai-automation/actions/workflows/ci.yml)
+[![CI](https://github.com/rohitsharma1232004/voice-insight-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/rohitsharma1232004/voice-insight-automation/actions/workflows/ci.yml)
 
 **AI-powered voice intelligence and human-in-the-loop operations automation.**
 
-VoiceOps AI turns field interviews, customer feedback and inspection recordings into quality-checked transcripts and structured operational insights. It combines deterministic audio QA with AI-assisted transcription and triage, then keeps approval and follow-up decisions with a human reviewer.
+Voice Insight Automation turns field interviews, customer feedback and inspection recordings into quality-checked transcripts and structured operational insights. It combines deterministic audio QA with AI-assisted transcription and triage, then keeps approval and follow-up decisions with a human reviewer.
 
 This is a portfolio-grade AI automation project built around a realistic workflow: unstructured voice enters the system, automation enriches it, and an operations team receives traceable outputs it can act on.
 
@@ -102,7 +102,7 @@ GROQ_ANALYSIS_MODEL=llama-3.1-8b-instant
 AI_AUTO_PROCESS=true
 ```
 
-Never commit `.env` or an API key. When the key is absent, VoiceOps AI clearly switches to local mode: capture, quality scoring, storage and human review continue to work, while AI actions stay disabled.
+Never commit `.env` or an API key. When the key is absent, the application clearly switches to local mode: capture, quality scoring, storage and human review continue to work, while AI actions stay disabled.
 
 ## API surface
 

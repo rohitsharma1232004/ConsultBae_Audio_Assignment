@@ -216,7 +216,7 @@ export default function App() {
       };
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        setFile(new File([blob], `voiceops-response-${Date.now()}.webm`, { type: blob.type }));
+        setFile(new File([blob], `voice-insight-response-${Date.now()}.webm`, { type: blob.type }));
         stream.getTracks().forEach(track => track.stop());
         mediaStreamRef.current = null;
       };
@@ -338,7 +338,7 @@ export default function App() {
       <aside className="sidebar">
         <button className="brand" onClick={() => setView("overview")} aria-label="Go to overview">
           <span className="brand-mark"><AudioLines size={22} strokeWidth={2.4} /></span>
-          <span><strong>VoiceOps AI</strong><small>Voice intelligence</small></span>
+          <span><strong>Voice Insight</strong><small>AI automation</small></span>
         </button>
 
         <nav className="nav" aria-label="Primary navigation">
@@ -612,7 +612,7 @@ function CaptureForm({ form, updateForm, file, setFile, recording, recordSeconds
         <div className="panel checklist-card">
           <p className="section-kicker">Automatic checks</p>
           <h3>Quality gate</h3>
-          <p>VoiceOps AI checks every recording before it enters the review queue.</p>
+          <p>The platform checks every recording before it enters the review queue.</p>
           <ul>
             <li><Clock3 size={16} /><span><strong>Duration</strong>Minimum 2 seconds</span></li>
             <li><Activity size={16} /><span><strong>Sample rate</strong>16 kHz or higher</span></li>

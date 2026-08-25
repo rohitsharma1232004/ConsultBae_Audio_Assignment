@@ -1,5 +1,5 @@
 {
-  "name": "voiceops-ai-server",
+  "name": "voice-insight-server",
   "version": "2.0.0",
   "description": "Voice automation API for audio QA, AI transcription, structured insights and human review.",
   "author": "Rohit Sharma",
