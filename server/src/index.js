@@ -7,17 +7,32 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import db from "./db.js";
 import { extractAudioMetadata } from "./audio.js";
+import { assessAudioQuality } from "./quality.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const currentFile = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(currentFile);
 const app = express();
 const PORT = process.env.PORT || 5000;
 const uploadDir = path.resolve(__dirname, "..", "uploads");
+const allowedReviewStatuses = new Set(["pending", "approved", "needs_follow_up"]);
+const allowedOrigins = String(process.env.CLIENT_ORIGIN || "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
 
 fs.mkdirSync(uploadDir, { recursive: true });
 
-app.use(cors());
-app.use(express.json());
-app.use("/uploads", express.static(uploadDir));
+app.set("trust proxy", 1);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error("Origin is not allowed."));
+  }
+}));
+app.use(express.json({ limit: "100kb" }));
+app.use("/uploads", express.static(uploadDir, { fallthrough: false }));
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
@@ -29,51 +44,102 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 50 * 1024 * 1024
-  },
+  limits: { fileSize: 25 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith("audio/")) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only audio files are allowed."));
-    }
+    if (file.mimetype.startsWith("audio/")) cb(null, true);
+    else cb(new Error("Only audio files are allowed."));
   }
 });
 
+function cleanText(value, maxLength) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function isValidPhone(phone) {
+  return /^[+\d][\d\s()-]{7,21}$/.test(phone);
+}
+
+function metadataFromRow(row) {
+  return {
+    durationSeconds: row.duration_seconds,
+    sampleRateHz: row.sample_rate_hz,
+    sampleRateKHz: row.sample_rate_khz,
+    bitrateBps: row.bitrate_bps,
+    bitrateKbps: row.bitrate_kbps,
+    loudnessDb: row.loudness_db
+  };
+}
+
+function serializeSubmission(row, req) {
+  const audioPath = row.audio_path.startsWith("/") ? row.audio_path : `/${row.audio_path}`;
+  const audioUrl = row.audio_path.startsWith("http")
+    ? row.audio_path
+    : `${req.protocol}://${req.get("host")}${audioPath}`;
+
+  return {
+    ...row,
+    audio_url: audioUrl,
+    quality: assessAudioQuality(metadataFromRow(row))
+  };
+}
+
+const submissionSelect = `
+  SELECT
+    s.id,
+    p.name,
+    p.phone,
+    s.project_name,
+    s.response_type,
+    s.notes,
+    s.review_status,
+    s.review_notes,
+    s.reviewed_at,
+    s.original_filename,
+    s.audio_path,
+    s.mime_type,
+    s.file_size_bytes,
+    s.duration_seconds,
+    s.sample_rate_hz,
+    s.sample_rate_khz,
+    s.bitrate_bps,
+    s.bitrate_kbps,
+    s.loudness_db,
+    s.created_at
+  FROM audio_submissions s
+  JOIN people p ON p.id = s.person_id
+`;
+
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, service: "fieldvoice-api", timestamp: new Date().toISOString() });
 });
 
 app.post("/api/submissions", upload.single("audio"), async (req, res) => {
-  console.log("POST /api/submissions received:", {
-    file: req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size } : null,
-    body: req.body
-  });
-
   if (!req.file) {
-    console.log("Upload rejected: no file present");
     return res.status(400).json({ error: "Audio file is required." });
   }
 
-  const name = String(req.body.name ?? "").trim();
-  const phone = String(req.body.phone ?? "").trim();
+  const name = cleanText(req.body.name, 80);
+  const phone = cleanText(req.body.phone, 24);
+  const projectName = cleanText(req.body.projectName, 100) || "General";
+  const responseType = cleanText(req.body.responseType, 60) || "Field interview";
+  const notes = cleanText(req.body.notes, 500);
 
   if (!name || !phone) {
-    console.log("Upload rejected: missing name or phone");
     fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: "Name and phone are required." });
   }
 
+  if (!isValidPhone(phone)) {
+    fs.unlinkSync(req.file.path);
+    return res.status(400).json({ error: "Enter a valid phone number." });
+  }
+
   try {
-    console.log("Extracting metadata for:", req.file.path);
     const metadata = await extractAudioMetadata(req.file.path);
-    console.log("Metadata extracted:", metadata);
+    const quality = assessAudioQuality(metadata);
 
     const insertSubmission = db.transaction(() => {
-      let person = db
-        .prepare("SELECT id FROM people WHERE phone = ?")
-        .get(phone);
+      let person = db.prepare("SELECT id FROM people WHERE phone = ?").get(phone);
 
       if (!person) {
         const result = db
@@ -81,11 +147,10 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
           .run(name, phone);
         person = { id: result.lastInsertRowid };
       } else {
-        db.prepare("UPDATE people SET name = ? WHERE id = ?")
-          .run(name, person.id);
+        db.prepare("UPDATE people SET name = ? WHERE id = ?").run(name, person.id);
       }
 
-      const result = db.prepare(`
+      return db.prepare(`
         INSERT INTO audio_submissions (
           person_id,
           original_filename,
@@ -98,8 +163,11 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
           sample_rate_khz,
           bitrate_bps,
           bitrate_kbps,
-          loudness_db
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          loudness_db,
+          project_name,
+          response_type,
+          notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         person.id,
         req.file.originalname,
@@ -112,63 +180,121 @@ app.post("/api/submissions", upload.single("audio"), async (req, res) => {
         metadata.sampleRateKHz,
         metadata.bitrateBps,
         metadata.bitrateKbps,
-        metadata.loudnessDb
-      );
-
-      return result.lastInsertRowid;
+        metadata.loudnessDb,
+        projectName,
+        responseType,
+        notes || null
+      ).lastInsertRowid;
     });
 
     const insertedId = insertSubmission();
-    console.log("DB insert successful. Record id:", insertedId);
+    const row = db.prepare(`${submissionSelect} WHERE s.id = ?`).get(insertedId);
+
     res.status(201).json({
-      id: insertedId,
-      message: "Audio submitted successfully.",
-      metadata
+      message: "Voice response captured successfully.",
+      submission: serializeSubmission(row, req),
+      metadata,
+      quality
     });
   } catch (error) {
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    console.error("Submission failed:", error);
-    res.status(500).json({ error: error.message || "Audio processing failed." });
+    console.error("Audio processing failed:", error);
+    res.status(500).json({ error: "The audio could not be processed. Please try another file." });
   }
 });
 
-app.get("/api/submissions", (_req, res) => {
-  const rows = db.prepare(`
+app.get("/api/submissions", (req, res) => {
+  const search = cleanText(req.query.search, 80);
+  const status = cleanText(req.query.status, 30);
+  const project = cleanText(req.query.project, 100);
+  const filters = [];
+  const params = [];
+
+  if (search) {
+    filters.push("(p.name LIKE ? OR p.phone LIKE ? OR s.project_name LIKE ?)");
+    const pattern = `%${search}%`;
+    params.push(pattern, pattern, pattern);
+  }
+
+  if (status && allowedReviewStatuses.has(status)) {
+    filters.push("s.review_status = ?");
+    params.push(status);
+  }
+
+  if (project) {
+    filters.push("s.project_name = ?");
+    params.push(project);
+  }
+
+  const where = filters.length ? ` WHERE ${filters.join(" AND ")}` : "";
+  const rows = db
+    .prepare(`${submissionSelect}${where} ORDER BY s.id DESC LIMIT 250`)
+    .all(...params);
+
+  res.json(rows.map(row => serializeSubmission(row, req)));
+});
+
+app.get("/api/overview", (_req, res) => {
+  const totals = db.prepare(`
     SELECT
-      s.id,
-      p.name,
-      p.phone,
-      s.original_filename,
-      s.audio_path,
-      s.mime_type,
-      s.file_size_bytes,
-      s.duration_seconds,
-      s.sample_rate_hz,
-      s.sample_rate_khz,
-      s.bitrate_bps,
-      s.bitrate_kbps,
-      s.loudness_db,
-      s.created_at
-    FROM audio_submissions s
-    JOIN people p ON p.id = s.person_id
-    ORDER BY s.id DESC
+      COUNT(*) AS total_submissions,
+      COUNT(DISTINCT person_id) AS unique_people,
+      ROUND(AVG(duration_seconds), 1) AS average_duration_seconds,
+      SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END) AS pending_reviews,
+      SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS approved_reviews
+    FROM audio_submissions
+  `).get();
+
+  const projects = db.prepare(`
+    SELECT project_name, COUNT(*) AS submission_count
+    FROM audio_submissions
+    GROUP BY project_name
+    ORDER BY submission_count DESC, project_name ASC
+    LIMIT 8
   `).all();
 
-  const normalized = rows.map(row => ({
-    ...row,
-    audio_url: row.audio_path.startsWith("http")
-      ? row.audio_path
-      : `http://localhost:${PORT}${row.audio_path.startsWith("/") ? row.audio_path : `/${row.audio_path}`}`
-  }));
+  res.json({ ...totals, projects });
+});
 
-  console.log("GET /api/submissions returning:", rows.length, "rows");
-  res.json(normalized);
+app.patch("/api/submissions/:id/review", (req, res) => {
+  const id = Number(req.params.id);
+  const status = cleanText(req.body.status, 30);
+  const reviewNotes = cleanText(req.body.reviewNotes, 500);
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "Invalid submission id." });
+  }
+
+  if (!allowedReviewStatuses.has(status)) {
+    return res.status(400).json({ error: "Invalid review status." });
+  }
+
+  const result = db.prepare(`
+    UPDATE audio_submissions
+    SET review_status = ?, review_notes = ?, reviewed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(status, reviewNotes || null, id);
+
+  if (result.changes === 0) {
+    return res.status(404).json({ error: "Submission not found." });
+  }
+
+  const row = db.prepare(`${submissionSelect} WHERE s.id = ?`).get(id);
+  res.json(serializeSubmission(row, req));
 });
 
 app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({ error: "Audio file must be smaller than 25 MB." });
+  }
+
   res.status(400).json({ error: error.message || "Request failed." });
 });
 
-app.listen(PORT, () => {
-  console.log(`API running on http://localhost:${PORT}`);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
+  app.listen(PORT, () => {
+    console.log(`FieldVoice API running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
